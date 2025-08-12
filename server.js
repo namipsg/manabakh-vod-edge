@@ -6,6 +6,13 @@ require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', 'https://manabax.ir,https://tv.manabax.ir');
+  res.header('Access-Control-Allow-Methods', '*');
+  res.header('Access-Control-Allow-Headers', '*');
+  next();
+});
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
 const minioEndpoint = process.env.MINIO_ENDPOINT?.replace(/^https?:\/\//, '');
