@@ -14,9 +14,9 @@ metadata:
   namespace: edge-cdn
 data:
   PORT: "3000"
-  NODE_ENV: "production"
+  NODE_ENV: "development"
   HOST: "localhost"
-  LOG_LEVEL: "info"
+  LOG_LEVEL: "debug"
 
   S3_ENDPOINT: "minio.minio-system"
   S3_ACCESS_KEY_ID: "rfdJLfDAM3ROyNrBFmsL"
@@ -101,7 +101,7 @@ spec:
         - name: dockerhub-secret
       containers:
         - name: edge-vod-cache
-          image: namipsg/manabakh:mcdn-r5
+          image: namipsg/manabakh:mcdn-r6
           ports:
             - containerPort: 3000
           envFrom:
@@ -109,28 +109,13 @@ spec:
                 name: vod-cache-config
           resources:
             requests:
-              memory: "128Mi"
-              cpu: "100m"
+              memory: "1Gi"
+              cpu: "1000m"
             limits:
-              memory: "512Mi"
-              cpu: "500m"
-          livenessProbe:
-            httpGet:
-              path: /
-              port: 3000
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /
-              port: 3000
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            timeoutSeconds: 3
-            successThreshold: 1
-            failureThreshold: 3
+              memory: "16Gi"
+              cpu: "3000m"
+          
+          
 ---
 apiVersion: v1
 kind: Service
@@ -168,7 +153,7 @@ spec:
   tls:
     - hosts:
         - mcdn.manabakh.ir
-      secretName: mcdn-tls
+      secretName: ssl-secret
   rules:
     - host: mcdn.manabakh.ir
       http:

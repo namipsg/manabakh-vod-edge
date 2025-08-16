@@ -23,8 +23,8 @@ router.use('/*', (req: CDNRequest, _res, next) => {
 // Main CDN route handler
 router.get('/*', async (req: CDNRequest, res: Response) => {
   const startTime = Date.now();
-  const cdnPath = 'nami/' + req.cdnPath|| '';
-  
+  const cdnPath = req.cdnPath?.includes('/cdn') ? req.cdnPath : 'nami/' + req.cdnPath || '';
+
   try {
     if (!cdnPath) {
       return res.status(400).json({
@@ -39,7 +39,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
 
     // Parse bucket and object key from path
     const { bucket, key } = s3Service.parseObjectPath(cdnPath);
-    
+
     logger.info({
       type: 'cdn-request',
       bucket,
@@ -67,7 +67,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
 
         // Determine content type
         let contentType = cachedItem.contentType || detectContentType(key);
-        
+
         // Set headers
         res.set({
           'Content-Type': contentType,
@@ -84,7 +84,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
 
     // Handle range requests
     let rangeHeader: string | undefined;
-    
+
     if (range) {
       rangeHeader = range;
       logger.debug({
@@ -97,7 +97,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
 
     // Get object from S3
     const s3Response = await s3Service.getObject(bucket, key, rangeHeader);
-    
+
     if (!s3Response.body) {
       return res.status(404).json({
         error: {
@@ -152,10 +152,10 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
     res.set('X-Cache', 'MISS');
 
     // Special handling for M3U8 playlists
-    if (contentType?.includes('application/vnd.apple.mpegurl') || 
-        contentType?.includes('application/x-mpegURL') || 
-        key.endsWith('.m3u8')) {
-      
+    if (contentType?.includes('application/vnd.apple.mpegurl') ||
+      contentType?.includes('application/x-mpegURL') ||
+      key.endsWith('.m3u8')) {
+
       logger.debug({
         type: 'cdn-request',
         bucket,
@@ -165,18 +165,18 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
       // Read the entire stream for M3U8 processing
       const chunks: Buffer[] = [];
       const stream = s3Response.body as NodeJS.ReadableStream;
-      
+
       stream.on('data', (chunk) => chunks.push(chunk));
       stream.on('end', () => {
         try {
           const content = Buffer.concat(chunks).toString('utf-8');
-          const baseUrl = `${req.protocol}://${req.get('host')}/cdn/${bucket}/`;
+          const baseUrl = `${req.protocol}://${req.get('host')}/vod/`;
           const processedContent = processM3U8ContentForCDN(content, baseUrl, key);
-          
+
           const processedBuffer = Buffer.from(processedContent, 'utf-8');
           res.set('Content-Length', processedBuffer.length.toString());
           res.send(processedContent);
-          
+
           // Cache processed M3U8 content (they're usually small)
           if (!range && processedBuffer.length < 1024 * 1024) { // Cache if < 1MB
             setCacheItem(cacheKey, processedBuffer, processedBuffer.length, {
@@ -191,7 +191,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
               }, 'Failed to cache M3U8 content');
             });
           }
-          
+
           logger.info({
             type: 'cdn-response',
             bucket,
@@ -207,7 +207,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
             bucket,
             key,
           }, 'Failed to process M3U8 content');
-          
+
           res.status(500).json({
             error: {
               code: 500,
@@ -218,7 +218,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
           });
         }
       });
-      
+
       stream.on('error', (error) => {
         logger.error({
           type: 'cdn-error',
@@ -226,7 +226,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
           bucket,
           key,
         }, 'Stream error while processing M3U8');
-        
+
         if (!res.headersSent) {
           res.status(500).json({
             error: {
@@ -238,13 +238,13 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
           });
         }
       });
-      
+
       return;
     }
 
     // Stream other content directly
     const stream = s3Response.body as NodeJS.ReadableStream;
-    
+
     // For small files (< 5MB), collect data for caching
     const shouldCache = !range && s3Response.contentLength && s3Response.contentLength < 5 * 1024 * 1024;
     let cacheBuffer: Buffer[] = [];
@@ -255,7 +255,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
       stream.on('data', (chunk: Buffer) => {
         cacheBuffer.push(chunk);
         totalSize += chunk.length;
-        
+
         // If it gets too big while streaming, stop collecting for cache
         if (totalSize > 5 * 1024 * 1024) {
           cacheBuffer = [];
@@ -291,7 +291,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
         }
       });
     }
-    
+
     // Handle streaming with proper error handling
     stream.on('error', (error) => {
       logger.error({
@@ -300,7 +300,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
         bucket,
         key,
       }, 'Stream error');
-      
+
       if (!res.headersSent) {
         res.status(500).json({
           error: {
@@ -324,7 +324,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
     });
 
     await pipelineAsync(stream, res);
-    
+
     logger.info({
       type: 'cdn-response',
       bucket,
@@ -344,7 +344,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
 
     if (!res.headersSent) {
       const statusCode = s3Service.isS3Error(error) ? s3Service.getS3ErrorStatus(error) : 500;
-      
+
       res.status(statusCode).json({
         error: {
           code: statusCode,
@@ -360,7 +360,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
 // HEAD request support for object metadata
 router.head('/*', async (req: CDNRequest, res: Response) => {
   const cdnPath = req.cdnPath || '';
-  
+
   try {
     if (!cdnPath) {
       return res.status(400).end();
@@ -368,7 +368,7 @@ router.head('/*', async (req: CDNRequest, res: Response) => {
 
     const { bucket, key } = s3Service.parseObjectPath(cdnPath);
     const metadata = await s3Service.headObject(bucket, key);
-    
+
     // Set headers
     const headers: Record<string, string> = {
       'Cache-Control': 'public, max-age=3600',
