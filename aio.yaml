@@ -13,19 +13,51 @@ metadata:
   name: vod-cache-config
   namespace: edge-cdn
 data:
-  NODE_ENV: "production"
   PORT: "3000"
+  NODE_ENV: "production"
+  HOST: "localhost"
+  LOG_LEVEL: "info"
+
+  S3_ENDPOINT: "minio.minio-system"
+  S3_ACCESS_KEY_ID: rfdJLfDAM3ROyNrBFmsL
+  S3_SECRET_ACCESS_KEY: 0EE1FqCiWj5EeVGepSCGcHgqKNbDOPI55Qh2r8yj
+  S3_REGION: ""
+  S3_BUCKET_NAME: nami
+  S3_FORCE_PATH_STYLE: "true"
+  S3_USE_SSL: "false"
+
+  ALLOWED_ORIGINS: "*"
+  MAX_REQUEST_SIZE: 10485760
+  REQUEST_TIMEOUT: 30000
+  ENABLE_DOMAIN_WHITELIST: "false"
+  ALLOWED_DOMAINS: ""
+  ENABLE_RATE_LIMITING: "false"
+  RATE_LIMIT_WINDOW: 60000
+  RATE_LIMIT_MAX_REQUESTS: 60
+
+  ENABLE_CACHE: "true"
+  CACHE_MODE: redis
+  CACHE_TTL: 300
+  CACHE_CHECK_PERIOD: 600
+  CACHE_MAX_ITEMS: 1000
+  CACHE_MAX_SIZE: 104857600
+
+  USE_WORKER_THREADS: true
+  WORKER_THREADS: 0
+
+  ENABLE_STREAMING: true
+  STREAM_SIZE_THRESHOLD: 1048576
+
+  USE_CLOUDFLARE: false
+
   REDIS_URL: "redis://redis-cluster-service.redis-cluster:6379"
-  MINIO_ENDPOINT: "minio.minio-system"
-  MINIO_PORT: "9000"
-  MINIO_USE_SSL: "false"
-  MINIO_ACCESS_KEY: "AjXTh3UEiKTr6o7MTnnD"
-  MINIO_SECRET_KEY: "HKfMzkj4oXHqgpdFlQqsBraBYjGE5eGXBZQjqsBu"
-  MINIO_BUCKET_NAME: nami
-  VOD_BUCKET_NAME: nami
+  REDIS_HOST: redis://redis-cluster-service.redis-cluster
+  REDIS_PORT: 6379
   CASSANDRA_HOSTS: cassandra-client.edge-cdn:9042
-  REDIS_MEMORY_THRESHOLD: "0.8"
-  CASSANDRA_MAX_FILES: "100000"
+  REDIS_MEMORY_THRESHOLD: 0.8
+  CASSANDRA_MAX_FILES: 100000
+  CASSANDRA_LOCAL_DATA_CENTER: DC1-VoD
+  CASSANDRA_KEYSPACE: cdn_cache
 
 ---
 apiVersion: apps/v1
@@ -69,7 +101,7 @@ spec:
         - name: dockerhub-secret
       containers:
         - name: edge-vod-cache
-          image: namipsg/manabakh:mcdn-r2
+          image: namipsg/manabakh:mcdn-r3
           ports:
             - containerPort: 3000
           envFrom:
@@ -129,7 +161,7 @@ metadata:
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.tls: "true"
-    traefik.ingress.kubernetes.io/router.middlewares: "traefik-cors-headers@kubernetescrd"
+    traefik.ingress.kubernetes.io/router.middlewares: traefik-cors-headers@kubernetescrd,traefik-compression@kubernetescrd,traefik-rate-limit@kubernetescrd,traefik-default-headers@kubernetescrd
 
 spec:
   ingressClassName: traefik
