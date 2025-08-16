@@ -170,7 +170,7 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
       stream.on('end', () => {
         try {
           const content = Buffer.concat(chunks).toString('utf-8');
-          const baseUrl = `${req.protocol}://${req.get('host')}/vod/`;
+          const baseUrl = `https://${req.get('host')}/vod/`;
           const processedContent = processM3U8ContentForCDN(content, baseUrl, key);
 
           const processedBuffer = Buffer.from(processedContent, 'utf-8');

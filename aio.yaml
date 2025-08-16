@@ -18,7 +18,7 @@ data:
   HOST: "localhost"
   LOG_LEVEL: "debug"
 
-  S3_ENDPOINT: "minio.minio-system"
+  S3_ENDPOINT: "http://minio.minio-system:9000"
   S3_ACCESS_KEY_ID: "rfdJLfDAM3ROyNrBFmsL"
   S3_SECRET_ACCESS_KEY: "0EE1FqCiWj5EeVGepSCGcHgqKNbDOPI55Qh2r8yj"
   S3_REGION: ""
@@ -101,7 +101,7 @@ spec:
         - name: dockerhub-secret
       containers:
         - name: edge-vod-cache
-          image: namipsg/manabakh:mcdn-r6
+          image: namipsg/manabakh:mcdn-r7
           ports:
             - containerPort: 3000
           envFrom:
