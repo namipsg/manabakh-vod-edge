@@ -19,45 +19,45 @@ data:
   LOG_LEVEL: "info"
 
   S3_ENDPOINT: "minio.minio-system"
-  S3_ACCESS_KEY_ID: rfdJLfDAM3ROyNrBFmsL
-  S3_SECRET_ACCESS_KEY: 0EE1FqCiWj5EeVGepSCGcHgqKNbDOPI55Qh2r8yj
+  S3_ACCESS_KEY_ID: "rfdJLfDAM3ROyNrBFmsL"
+  S3_SECRET_ACCESS_KEY: "0EE1FqCiWj5EeVGepSCGcHgqKNbDOPI55Qh2r8yj"
   S3_REGION: ""
-  S3_BUCKET_NAME: nami
+  S3_BUCKET_NAME: "nami"
   S3_FORCE_PATH_STYLE: "true"
   S3_USE_SSL: "false"
 
   ALLOWED_ORIGINS: "*"
-  MAX_REQUEST_SIZE: 10485760
-  REQUEST_TIMEOUT: 30000
+  MAX_REQUEST_SIZE: "10485760"
+  REQUEST_TIMEOUT: "30000"
   ENABLE_DOMAIN_WHITELIST: "false"
   ALLOWED_DOMAINS: ""
   ENABLE_RATE_LIMITING: "false"
-  RATE_LIMIT_WINDOW: 60000
-  RATE_LIMIT_MAX_REQUESTS: 60
+  RATE_LIMIT_WINDOW: "60000"
+  RATE_LIMIT_MAX_REQUESTS: "60"
 
   ENABLE_CACHE: "true"
-  CACHE_MODE: redis
-  CACHE_TTL: 300
-  CACHE_CHECK_PERIOD: 600
-  CACHE_MAX_ITEMS: 1000
-  CACHE_MAX_SIZE: 104857600
+  CACHE_MODE: "redis"
+  CACHE_TTL: "300"
+  CACHE_CHECK_PERIOD: "600"
+  CACHE_MAX_ITEMS: "1000"
+  CACHE_MAX_SIZE: "104857600"
 
-  USE_WORKER_THREADS: true
-  WORKER_THREADS: 0
+  USE_WORKER_THREADS: "true"
+  WORKER_THREADS: "0"
 
-  ENABLE_STREAMING: true
-  STREAM_SIZE_THRESHOLD: 1048576
+  ENABLE_STREAMING: "true"
+  STREAM_SIZE_THRESHOLD: "1048576"
 
-  USE_CLOUDFLARE: false
+  USE_CLOUDFLARE: "false"
 
   REDIS_URL: "redis://redis-cluster-service.redis-cluster:6379"
-  REDIS_HOST: redis://redis-cluster-service.redis-cluster
-  REDIS_PORT: 6379
-  CASSANDRA_HOSTS: cassandra-client.edge-cdn:9042
-  REDIS_MEMORY_THRESHOLD: 0.8
-  CASSANDRA_MAX_FILES: 100000
-  CASSANDRA_LOCAL_DATA_CENTER: DC1-VoD
-  CASSANDRA_KEYSPACE: cdn_cache
+  REDIS_HOST: "redis-cluster-service.redis-cluster"
+  REDIS_PORT: "6379"
+  CASSANDRA_HOSTS: "cassandra-client.edge-cdn:9042"
+  REDIS_MEMORY_THRESHOLD: "0.8"
+  CASSANDRA_MAX_FILES: "100000"
+  CASSANDRA_LOCAL_DATA_CENTER: "DC1-VoD"
+  CASSANDRA_KEYSPACE: "cdn_cache"
 
 ---
 apiVersion: apps/v1
@@ -101,7 +101,7 @@ spec:
         - name: dockerhub-secret
       containers:
         - name: edge-vod-cache
-          image: namipsg/manabakh:mcdn-r3
+          image: namipsg/manabakh:mcdn-r5
           ports:
             - containerPort: 3000
           envFrom:
@@ -116,7 +116,7 @@ spec:
               cpu: "500m"
           livenessProbe:
             httpGet:
-              path: /health
+              path: /
               port: 3000
             initialDelaySeconds: 30
             periodSeconds: 10
@@ -124,7 +124,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
+              path: /
               port: 3000
             initialDelaySeconds: 5
             periodSeconds: 5

@@ -23,7 +23,7 @@ router.use('/*', (req: CDNRequest, _res, next) => {
 // Main CDN route handler
 router.get('/*', async (req: CDNRequest, res: Response) => {
   const startTime = Date.now();
-  const cdnPath = req.cdnPath?.replace('vod/','nami/') || '';
+  const cdnPath = 'nami/' + req.cdnPath|| '';
   
   try {
     if (!cdnPath) {

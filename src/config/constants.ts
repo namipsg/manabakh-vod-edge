@@ -107,9 +107,9 @@ export const ROUTES = {
   PROXY_BASE: '/proxy',
   PROXY_PATH: '/proxy/:url',
   PROXY_BASE64: '/proxy-base64/:encodedUrl',
-  CDN_BASE: '/cdn',
-  CDN_BUCKET_OBJECT: '/cdn/:bucket/*',
-  CDN_OBJECT: '/cdn/*',
+  CDN_BASE: '/vod',
+  CDN_BUCKET_OBJECT: '/vod/:bucket/*',
+  CDN_OBJECT: '/vod/*',
 };
 
 /**
