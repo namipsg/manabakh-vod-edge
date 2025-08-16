@@ -67,8 +67,6 @@ RUN npm ci --only=production && npm cache clean --force
 # Copy built application from development stage
 COPY --from=development --chown=nodejs:nodejs /app/dist ./dist
 
-# Copy necessary files
-COPY --chown=nodejs:nodejs .env.example .env
 
 # Create cache and logs directories
 RUN mkdir -p /app/cache /app/logs && \
@@ -79,27 +77,6 @@ USER nodejs
 
 # Expose port
 EXPOSE 3000
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD node -e "
-        const http = require('http');
-        const options = {
-            host: 'localhost',
-            port: 3000,
-            path: '/proxy/status',
-            timeout: 5000,
-        };
-        const request = http.request(options, (res) => {
-            if (res.statusCode === 200) {
-                process.exit(0);
-            } else {
-                process.exit(1);
-            }
-        });
-        request.on('error', () => process.exit(1));
-        request.end();
-    "
 
 # Use dumb-init to handle signals properly
 ENTRYPOINT ["dumb-init", "--"]
