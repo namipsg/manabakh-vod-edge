@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { s3Service } from './services/s3-service.js';
 import { logger } from './middleware.js';
-import { processM3U8ContentForCDN } from './utils/m3u8-handler.js';
 import { detectContentType } from './utils/helpers.js';
 import { generateCacheKey, getCacheItem, setCacheItem } from './utils/cache-v2.js';
 import { pipeline } from 'stream';
@@ -151,146 +150,48 @@ router.get('/*', async (req: CDNRequest, res: Response) => {
     // Add cache status header
     res.set('X-Cache', 'MISS');
 
-    // Special handling for M3U8 playlists
-    if (contentType?.includes('application/vnd.apple.mpegurl') ||
-      contentType?.includes('application/x-mpegURL') ||
-      key.endsWith('.m3u8')) {
-
-      logger.debug({
-        type: 'cdn-request',
-        bucket,
-        key,
-      }, 'Processing M3U8 playlist');
-
-      // Read the entire stream for M3U8 processing
-      const chunks: Buffer[] = [];
-      const stream = s3Response.body as NodeJS.ReadableStream;
-
-      stream.on('data', (chunk) => chunks.push(chunk));
-      stream.on('end', () => {
-        try {
-          const content = Buffer.concat(chunks).toString('utf-8');
-          const baseUrl = `https://${req.get('host')}/vod/`;
-          const processedContent = processM3U8ContentForCDN(content, baseUrl, key);
-
-          const processedBuffer = Buffer.from(processedContent, 'utf-8');
-          res.set('Content-Length', processedBuffer.length.toString());
-          res.send(processedContent);
-
-          // Cache processed M3U8 content (they're usually small)
-          if (!range && processedBuffer.length < 1024 * 1024) { // Cache if < 1MB
-            setCacheItem(cacheKey, processedBuffer, processedBuffer.length, {
-              contentType,
-              etag: s3Response.etag,
-              lastModified: s3Response.lastModified,
-            }).catch((error) => {
-              logger.warn({
-                type: 'cdn-cache',
-                error: error instanceof Error ? error.message : String(error),
-                key: cacheKey.substring(0, 50),
-              }, 'Failed to cache M3U8 content');
-            });
-          }
-
-          logger.info({
-            type: 'cdn-response',
-            bucket,
-            key,
-            statusCode: res.statusCode,
-            duration: Date.now() - startTime,
-            size: processedBuffer.length,
-          }, 'M3U8 playlist served');
-        } catch (error) {
-          logger.error({
-            type: 'cdn-error',
-            error: error instanceof Error ? error.message : String(error),
-            bucket,
-            key,
-          }, 'Failed to process M3U8 content');
-
-          res.status(500).json({
-            error: {
-              code: 500,
-              message: 'Failed to process playlist',
-            },
-            success: false,
-            timestamp: new Date().toISOString(),
-          });
-        }
-      });
-
-      stream.on('error', (error) => {
-        logger.error({
-          type: 'cdn-error',
-          error: error instanceof Error ? error.message : String(error),
-          bucket,
-          key,
-        }, 'Stream error while processing M3U8');
-
-        if (!res.headersSent) {
-          res.status(500).json({
-            error: {
-              code: 500,
-              message: 'Stream error',
-            },
-            success: false,
-            timestamp: new Date().toISOString(),
-          });
-        }
-      });
-
-      return;
-    }
+    // Files are served as-is without path rewriting
 
     // Stream other content directly
     const stream = s3Response.body as NodeJS.ReadableStream;
 
-    // For small files (< 5MB), collect data for caching
-    const shouldCache = !range && s3Response.contentLength && s3Response.contentLength < 5 * 1024 * 1024;
+    // Collect data for caching all files while streaming
     let cacheBuffer: Buffer[] = [];
     let totalSize = 0;
 
-    if (shouldCache) {
-      // Collect data for caching while streaming
-      stream.on('data', (chunk: Buffer) => {
-        cacheBuffer.push(chunk);
-        totalSize += chunk.length;
+    // Collect data for caching while streaming
+    stream.on('data', (chunk: Buffer) => {
+      cacheBuffer.push(chunk);
+      totalSize += chunk.length;
+    });
 
-        // If it gets too big while streaming, stop collecting for cache
-        if (totalSize > 5 * 1024 * 1024) {
-          cacheBuffer = [];
-          totalSize = 0;
-        }
-      });
-
-      stream.on('end', () => {
-        // Cache the collected data if it's still reasonable size
-        if (cacheBuffer.length > 0 && totalSize > 0 && totalSize < 5 * 1024 * 1024) {
-          const fullBuffer = Buffer.concat(cacheBuffer);
-          setCacheItem(cacheKey, fullBuffer, fullBuffer.length, {
-            contentType,
-            etag: s3Response.etag,
-            lastModified: s3Response.lastModified,
-          }).then((success) => {
-            if (success) {
-              logger.debug({
-                type: 'cdn-cache',
-                bucket,
-                key,
-                size: totalSize,
-              }, 'File cached for future requests');
-            }
-          }).catch((error) => {
-            logger.warn({
+    stream.on('end', () => {
+      // Cache all collected data
+      if (cacheBuffer.length > 0 && totalSize > 0) {
+        const fullBuffer = Buffer.concat(cacheBuffer);
+        setCacheItem(cacheKey, fullBuffer, fullBuffer.length, {
+          contentType,
+          etag: s3Response.etag,
+          lastModified: s3Response.lastModified,
+        }).then((success) => {
+          if (success) {
+            logger.debug({
               type: 'cdn-cache',
-              error: error instanceof Error ? error.message : String(error),
               bucket,
               key,
-            }, 'Failed to cache file');
-          });
-        }
-      });
-    }
+              size: totalSize,
+            }, 'File cached for future requests');
+          }
+        }).catch((error) => {
+          logger.warn({
+            type: 'cdn-cache',
+            error: error instanceof Error ? error.message : String(error),
+            bucket,
+            key,
+          }, 'Failed to cache file');
+        });
+      }
+    });
 
     // Handle streaming with proper error handling
     stream.on('error', (error) => {

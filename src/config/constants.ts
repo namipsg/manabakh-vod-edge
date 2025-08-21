@@ -66,6 +66,8 @@ export const CACHE = {
   MAX_SIZE: parseInt(process.env.CACHE_MAX_SIZE || '104857600', 10), // 100MB default
   MEMORY_THRESHOLD: parseFloat(process.env.REDIS_MEMORY_THRESHOLD || '0.8'), // 80%
   MAX_FILES: parseInt(process.env.CASSANDRA_MAX_FILES || '100000', 10),
+  REDIS_CAPACITY_THRESHOLD: parseInt(process.env.REDIS_CAPACITY_THRESHOLD || '85', 10), // 85%
+  CASSANDRA_CAPACITY_THRESHOLD: parseInt(process.env.CASSANDRA_CAPACITY_THRESHOLD || '90', 10), // 90%
 };
 
 /**

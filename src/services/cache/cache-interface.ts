@@ -11,6 +11,7 @@ export interface CacheItem {
   lastModified?: Date;
   createdAt: Date;
   expiresAt: Date;
+  hitCount?: number;
 }
 
 export interface CacheStats {
@@ -77,6 +78,32 @@ export interface CacheBackend {
    * Check if the cache backend is healthy
    */
   isHealthy(): Promise<boolean>;
+
+  /**
+   * Get capacity information
+   */
+  getCapacityInfo(): Promise<{
+    usedBytes: number;
+    maxBytes: number;
+    usedPercentage: number;
+    itemCount: number;
+    maxItems: number;
+  }>;
+
+  /**
+   * Get items sorted by hit count (lowest first)
+   */
+  getItemsByHitCount(limit?: number): Promise<Array<{
+    key: string;
+    hitCount: number;
+    size: number;
+    createdAt: Date;
+  }>>;
+
+  /**
+   * Increment hit count for a cache item
+   */
+  incrementHitCount(key: string): Promise<boolean>;
 }
 
 export type CacheMode = 'memory' | 'redis' | 'cassandra' | 'redis-cassandra';

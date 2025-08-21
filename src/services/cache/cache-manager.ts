@@ -39,8 +39,12 @@ class MemoryCache implements CacheBackend {
 
   async get(key: string): Promise<CacheItem | null> {
     try {
-      const item = this.cache.get<{ data: Buffer, size: number, contentType?: string, etag?: string, lastModified?: Date, createdAt: Date, expiresAt: Date }>(key);
+      const item = this.cache.get<{ data: Buffer, size: number, contentType?: string, etag?: string, lastModified?: Date, createdAt: Date, expiresAt: Date, hitCount?: number }>(key);
       if (item) {
+        // Increment hit count
+        item.hitCount = (item.hitCount || 0) + 1;
+        this.cache.set(key, item, this.cache.getTtl(key) || CACHE.TTL);
+        
         this.hits++;
         return {
           data: item.data,
@@ -50,6 +54,7 @@ class MemoryCache implements CacheBackend {
           lastModified: item.lastModified,
           createdAt: item.createdAt,
           expiresAt: item.expiresAt,
+          hitCount: item.hitCount,
         };
       } else {
         this.misses++;
@@ -101,6 +106,7 @@ class MemoryCache implements CacheBackend {
         lastModified: options.lastModified,
         createdAt: now,
         expiresAt,
+        hitCount: 0,
       };
 
       const success = this.cache.set(key, cacheItem, ttl);
@@ -165,6 +171,68 @@ class MemoryCache implements CacheBackend {
 
   async isHealthy(): Promise<boolean> {
     return true;
+  }
+
+  async getCapacityInfo(): Promise<{
+    usedBytes: number;
+    maxBytes: number;
+    usedPercentage: number;
+    itemCount: number;
+    maxItems: number;
+  }> {
+    return {
+      usedBytes: this.currentCacheSize,
+      maxBytes: CACHE.MAX_SIZE,
+      usedPercentage: CACHE.MAX_SIZE > 0 ? (this.currentCacheSize / CACHE.MAX_SIZE) * 100 : 0,
+      itemCount: this.cache.keys().length,
+      maxItems: CACHE.MAX_ITEMS,
+    };
+  }
+
+  async getItemsByHitCount(limit: number = 100): Promise<Array<{
+    key: string;
+    hitCount: number;
+    size: number;
+    createdAt: Date;
+  }>> {
+    const keys = this.cache.keys();
+    const items: Array<{
+      key: string;
+      hitCount: number;
+      size: number;
+      createdAt: Date;
+    }> = [];
+
+    for (const key of keys.slice(0, limit)) {
+      const item = this.cache.get<{ size: number, hitCount?: number, createdAt: Date }>(key);
+      if (item) {
+        items.push({
+          key,
+          hitCount: item.hitCount || 0,
+          size: item.size,
+          createdAt: item.createdAt,
+        });
+      }
+    }
+
+    // Sort by hit count (ascending - lowest first)
+    return items.sort((a, b) => a.hitCount - b.hitCount);
+  }
+
+  async incrementHitCount(key: string): Promise<boolean> {
+    try {
+      const item = this.cache.get<{ hitCount?: number }>(key);
+      if (item) {
+        item.hitCount = (item.hitCount || 0) + 1;
+        const ttl = this.cache.getTtl(key) || CACHE.TTL;
+        this.cache.set(key, item, ttl);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      this.errors++;
+      return false;
+    }
   }
 
   private formatBytes(bytes: number): string {

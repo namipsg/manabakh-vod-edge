@@ -410,4 +410,164 @@ export class HybridCache implements CacheBackend {
       return false;
     }
   }
+
+  async getCapacityInfo(): Promise<{
+    usedBytes: number;
+    maxBytes: number;
+    usedPercentage: number;
+    itemCount: number;
+    maxItems: number;
+  }> {
+    try {
+      let redisCapacity = {
+        usedBytes: 0,
+        maxBytes: 0,
+        usedPercentage: 0,
+        itemCount: 0,
+        maxItems: 0,
+      };
+      let cassandraCapacity = {
+        usedBytes: 0,
+        maxBytes: 0,
+        usedPercentage: 0,
+        itemCount: 0,
+        maxItems: 0,
+      };
+
+      if (this.redisConnected) {
+        try {
+          redisCapacity = await this.redisCache.getCapacityInfo();
+        } catch (error) {
+          logger.error({
+            type: 'hybrid-cache',
+            component: 'redis',
+            error: error instanceof Error ? error.message : String(error),
+          }, 'Failed to get Redis capacity info');
+        }
+      }
+
+      if (this.cassandraConnected) {
+        try {
+          cassandraCapacity = await this.cassandraCache.getCapacityInfo();
+        } catch (error) {
+          logger.error({
+            type: 'hybrid-cache',
+            component: 'cassandra',
+            error: error instanceof Error ? error.message : String(error),
+          }, 'Failed to get Cassandra capacity info');
+        }
+      }
+
+      return {
+        usedBytes: redisCapacity.usedBytes + cassandraCapacity.usedBytes,
+        maxBytes: redisCapacity.maxBytes + cassandraCapacity.maxBytes,
+        usedPercentage: Math.max(redisCapacity.usedPercentage, cassandraCapacity.usedPercentage),
+        itemCount: redisCapacity.itemCount + cassandraCapacity.itemCount,
+        maxItems: Math.max(redisCapacity.maxItems, cassandraCapacity.maxItems),
+      };
+    } catch (error) {
+      logger.error({
+        type: 'hybrid-cache',
+        error: error instanceof Error ? error.message : String(error),
+      }, 'Hybrid cache capacity info error');
+
+      return {
+        usedBytes: 0,
+        maxBytes: 0,
+        usedPercentage: 0,
+        itemCount: 0,
+        maxItems: 0,
+      };
+    }
+  }
+
+  async getItemsByHitCount(limit: number = 100): Promise<Array<{
+    key: string;
+    hitCount: number;
+    size: number;
+    createdAt: Date;
+  }>> {
+    try {
+      const allItems: Array<{
+        key: string;
+        hitCount: number;
+        size: number;
+        createdAt: Date;
+      }> = [];
+
+      if (this.redisConnected) {
+        try {
+          const redisItems = await this.redisCache.getItemsByHitCount(limit);
+          allItems.push(...redisItems.map(item => ({ ...item, source: 'redis' })));
+        } catch (error) {
+          logger.error({
+            type: 'hybrid-cache',
+            component: 'redis',
+            error: error instanceof Error ? error.message : String(error),
+          }, 'Failed to get Redis items by hit count');
+        }
+      }
+
+      if (this.cassandraConnected) {
+        try {
+          const cassandraItems = await this.cassandraCache.getItemsByHitCount(limit);
+          allItems.push(...cassandraItems.map(item => ({ ...item, source: 'cassandra' })));
+        } catch (error) {
+          logger.error({
+            type: 'hybrid-cache',
+            component: 'cassandra',
+            error: error instanceof Error ? error.message : String(error),
+          }, 'Failed to get Cassandra items by hit count');
+        }
+      }
+
+      // Remove duplicates and combine hit counts
+      const itemMap = new Map<string, {
+        key: string;
+        hitCount: number;
+        size: number;
+        createdAt: Date;
+      }>();
+
+      for (const item of allItems) {
+        const existing = itemMap.get(item.key);
+        if (existing) {
+          existing.hitCount += item.hitCount;
+        } else {
+          itemMap.set(item.key, {
+            key: item.key,
+            hitCount: item.hitCount,
+            size: item.size,
+            createdAt: item.createdAt,
+          });
+        }
+      }
+
+      // Sort by hit count (ascending - lowest first) and limit
+      return Array.from(itemMap.values())
+        .sort((a, b) => a.hitCount - b.hitCount)
+        .slice(0, limit);
+    } catch (error) {
+      logger.error({
+        type: 'hybrid-cache',
+        error: error instanceof Error ? error.message : String(error),
+      }, 'Hybrid cache getItemsByHitCount error');
+      return [];
+    }
+  }
+
+  async incrementHitCount(key: string): Promise<boolean> {
+    const promises: Promise<boolean>[] = [];
+
+    if (this.redisConnected) {
+      promises.push(this.redisCache.incrementHitCount(key));
+    }
+
+    if (this.cassandraConnected) {
+      promises.push(this.cassandraCache.incrementHitCount(key));
+    }
+
+    const results = await Promise.allSettled(promises);
+    return results.some(result => result.status === 'fulfilled' && result.value);
+  }
 }

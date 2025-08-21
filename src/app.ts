@@ -7,6 +7,7 @@ import proxyRoutes from './proxy-routes.js';
 import cdnRoutes from './cdn-routes.js';
 import { cacheManager } from './services/cache/cache-manager.js';
 import { getCacheStats, clearCache, switchCacheBackend, isCacheHealthy } from './utils/cache-v2.js';
+import { cacheCapacityManager } from './services/cache-capacity-manager.js';
 
 /**
  * Create and configure the Express application
@@ -185,6 +186,99 @@ app.get(`${ROUTES.PROXY_BASE}/cache/health`, async (req, res) => {
       error: {
         code: 500,
         message: 'Failed to check cache health',
+      },
+      success: false,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// Capacity management endpoints
+app.get(`${ROUTES.PROXY_BASE}/cache/capacity`, async (req, res) => {
+  try {
+    const backend = (cacheManager as any).backend;
+    const capacityInfo = await backend.getCapacityInfo();
+    const managerStatus = cacheCapacityManager.getStatus();
+    
+    res.json({
+      status: 'ok',
+      data: {
+        capacity: capacityInfo,
+        manager: managerStatus,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: {
+        code: 500,
+        message: 'Failed to get capacity info',
+      },
+      success: false,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+app.post(`${ROUTES.PROXY_BASE}/cache/capacity/check`, async (req, res) => {
+  try {
+    await cacheCapacityManager.forceCapacityCheck();
+    res.json({
+      status: 'ok',
+      message: 'Capacity check completed',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: {
+        code: 500,
+        message: 'Failed to perform capacity check',
+      },
+      success: false,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+app.post(`${ROUTES.PROXY_BASE}/cache/capacity/thresholds`, async (req, res) => {
+  try {
+    const { redisThreshold, cassandraThreshold } = req.body;
+    
+    if (redisThreshold && (redisThreshold < 0 || redisThreshold > 100)) {
+      return res.status(400).json({
+        error: {
+          code: 400,
+          message: 'Redis threshold must be between 0 and 100',
+        },
+        success: false,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    if (cassandraThreshold && (cassandraThreshold < 0 || cassandraThreshold > 100)) {
+      return res.status(400).json({
+        error: {
+          code: 400,
+          message: 'Cassandra threshold must be between 0 and 100',
+        },
+        success: false,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    cacheCapacityManager.updateThresholds(redisThreshold, cassandraThreshold);
+    
+    res.json({
+      status: 'ok',
+      message: 'Thresholds updated',
+      data: cacheCapacityManager.getStatus(),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: {
+        code: 500,
+        message: 'Failed to update thresholds',
       },
       success: false,
       timestamp: new Date().toISOString(),

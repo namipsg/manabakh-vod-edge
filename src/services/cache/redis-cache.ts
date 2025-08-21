@@ -110,10 +110,11 @@ export class RedisCache implements CacheBackend {
         'etag',
         'lastModified',
         'createdAt',
-        'expiresAt'
+        'expiresAt',
+        'hitCount'
       );
 
-      const [data, size, contentType, etag, lastModified, createdAt, expiresAt] = result;
+      const [data, size, contentType, etag, lastModified, createdAt, expiresAt, hitCount] = result;
 
       if (!data || !size || !createdAt || !expiresAt) {
         this.misses++;
@@ -137,7 +138,11 @@ export class RedisCache implements CacheBackend {
         lastModified: lastModified ? new Date(lastModified) : undefined,
         createdAt: new Date(createdAt),
         expiresAt: expiry,
+        hitCount: hitCount ? parseInt(hitCount, 10) : 0,
       };
+
+      // Increment hit count
+      await this.incrementHitCount(key);
 
       this.hits++;
       logger.debug({
@@ -145,6 +150,7 @@ export class RedisCache implements CacheBackend {
         action: 'hit',
         key: key.substring(0, 50),
         size: cacheItem.size,
+        hitCount: cacheItem.hitCount,
       }, 'Redis cache hit');
 
       return cacheItem;
@@ -183,6 +189,7 @@ export class RedisCache implements CacheBackend {
         lastModified: options.lastModified?.toISOString() || '',
         createdAt: now.toISOString(),
         expiresAt: expiresAt.toISOString(),
+        hitCount: '0',
       };
 
       // Use pipeline for atomic operation
@@ -387,6 +394,124 @@ export class RedisCache implements CacheBackend {
         type: 'redis-cache',
         error: error instanceof Error ? error.message : String(error),
       }, 'Redis cache health check failed');
+      return false;
+    }
+  }
+
+  async getCapacityInfo(): Promise<{
+    usedBytes: number;
+    maxBytes: number;
+    usedPercentage: number;
+    itemCount: number;
+    maxItems: number;
+  }> {
+    try {
+      if (!this.connected) {
+        return {
+          usedBytes: 0,
+          maxBytes: 0,
+          usedPercentage: 0,
+          itemCount: 0,
+          maxItems: 0,
+        };
+      }
+
+      const info = await this.client.info('memory');
+      const keys = await this.client.keys(`${REDIS.KEY_PREFIX}*`);
+      
+      const usedMemoryMatch = info.match(/used_memory:(\d+)/);
+      const maxMemoryMatch = info.match(/maxmemory:(\d+)/);
+      
+      const usedBytes = usedMemoryMatch ? parseInt(usedMemoryMatch[1], 10) : 0;
+      const maxBytes = maxMemoryMatch ? parseInt(maxMemoryMatch[1], 10) : 0;
+      const usedPercentage = maxBytes > 0 ? (usedBytes / maxBytes) * 100 : 0;
+
+      return {
+        usedBytes,
+        maxBytes,
+        usedPercentage,
+        itemCount: keys.length,
+        maxItems: -1, // Redis doesn't have a hard item limit
+      };
+    } catch (error) {
+      this.errors++;
+      logger.error({
+        type: 'redis-cache',
+        error: error instanceof Error ? error.message : String(error),
+      }, 'Redis cache capacity info error');
+      
+      return {
+        usedBytes: 0,
+        maxBytes: 0,
+        usedPercentage: 0,
+        itemCount: 0,
+        maxItems: 0,
+      };
+    }
+  }
+
+  async getItemsByHitCount(limit: number = 100): Promise<Array<{
+    key: string;
+    hitCount: number;
+    size: number;
+    createdAt: Date;
+  }>> {
+    try {
+      if (!this.connected) {
+        return [];
+      }
+
+      const keys = await this.client.keys(`${REDIS.KEY_PREFIX}*`);
+      const items: Array<{
+        key: string;
+        hitCount: number;
+        size: number;
+        createdAt: Date;
+      }> = [];
+
+      // Get hit count and size for each key
+      for (const key of keys.slice(0, limit)) {
+        const cleanKey = key.startsWith(REDIS.KEY_PREFIX) ? key.substring(REDIS.KEY_PREFIX.length) : key;
+        const result = await this.client.hmget(cleanKey, 'hitCount', 'size', 'createdAt');
+        
+        const [hitCount, size, createdAt] = result;
+        if (hitCount !== null && size !== null && createdAt !== null) {
+          items.push({
+            key: cleanKey,
+            hitCount: parseInt(hitCount, 10) || 0,
+            size: parseInt(size, 10) || 0,
+            createdAt: new Date(createdAt),
+          });
+        }
+      }
+
+      // Sort by hit count (ascending - lowest first)
+      return items.sort((a, b) => a.hitCount - b.hitCount);
+    } catch (error) {
+      this.errors++;
+      logger.error({
+        type: 'redis-cache',
+        error: error instanceof Error ? error.message : String(error),
+      }, 'Redis cache getItemsByHitCount error');
+      return [];
+    }
+  }
+
+  async incrementHitCount(key: string): Promise<boolean> {
+    try {
+      if (!this.connected) {
+        return false;
+      }
+
+      await this.client.hincrby(key, 'hitCount', 1);
+      return true;
+    } catch (error) {
+      this.errors++;
+      logger.error({
+        type: 'redis-cache',
+        error: error instanceof Error ? error.message : String(error),
+        key: key.substring(0, 50),
+      }, 'Redis cache incrementHitCount error');
       return false;
     }
   }

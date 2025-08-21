@@ -115,7 +115,8 @@ export class CassandraCache implements CacheBackend {
         etag text,
         last_modified timestamp,
         created_at timestamp,
-        expires_at timestamp
+        expires_at timestamp,
+        hit_count counter
       ) WITH gc_grace_seconds = 86400
         AND compaction = {'class': 'LeveledCompactionStrategy'}
     `;
@@ -153,7 +154,7 @@ export class CassandraCache implements CacheBackend {
       }
 
       const query = `
-        SELECT data, size, content_type, etag, last_modified, created_at, expires_at
+        SELECT data, size, content_type, etag, last_modified, created_at, expires_at, hit_count
         FROM ${this.keyspace}.${this.tableName}
         WHERE cache_key = ?
       `;
@@ -186,7 +187,11 @@ export class CassandraCache implements CacheBackend {
         lastModified: row.last_modified || undefined,
         createdAt: row.created_at || new Date(),
         expiresAt: expiresAt || new Date(),
+        hitCount: row.hit_count ? Number(row.hit_count) : 0,
       };
+
+      // Increment hit count
+      await this.incrementHitCount(key);
 
       this.hits++;
       logger.debug({
@@ -231,6 +236,12 @@ export class CassandraCache implements CacheBackend {
         USING TTL ${ttl}
       `;
 
+      const counterQuery = `
+        UPDATE ${this.keyspace}.${this.tableName}
+        SET hit_count = hit_count + 0
+        WHERE cache_key = ?
+      `;
+
       const params = [
         key,
         value,
@@ -243,6 +254,11 @@ export class CassandraCache implements CacheBackend {
       ];
 
       await this.client.execute(query, params, {
+        consistency: types.consistencies.localQuorum,
+      });
+
+      // Initialize counter
+      await this.client.execute(counterQuery, [key], {
         consistency: types.consistencies.localQuorum,
       });
 
@@ -487,6 +503,148 @@ export class CassandraCache implements CacheBackend {
         type: 'cassandra-cache',
         error: error instanceof Error ? error.message : String(error),
       }, 'Cassandra cache health check failed');
+      return false;
+    }
+  }
+
+  async getCapacityInfo(): Promise<{
+    usedBytes: number;
+    maxBytes: number;
+    usedPercentage: number;
+    itemCount: number;
+    maxItems: number;
+  }> {
+    try {
+      if (!this.connected) {
+        return {
+          usedBytes: 0,
+          maxBytes: 0,
+          usedPercentage: 0,
+          itemCount: 0,
+          maxItems: 0,
+        };
+      }
+
+      let itemCount = 0;
+      let usedBytes = 0;
+
+      try {
+        const countQuery = `
+          SELECT COUNT(*) as count, SUM(size) as total_size
+          FROM ${this.keyspace}.${this.tableName}
+          WHERE expires_at > ?
+          ALLOW FILTERING
+        `;
+        
+        const result = await this.client.execute(countQuery, [new Date()], {
+          consistency: types.consistencies.localOne,
+        });
+        
+        if (result.rows.length > 0) {
+          itemCount = Number(result.rows[0].count) || 0;
+          usedBytes = Number(result.rows[0].total_size) || 0;
+        }
+      } catch (error) {
+        logger.debug({
+          type: 'cassandra-cache',
+          error: error instanceof Error ? error.message : String(error),
+        }, 'Failed to get Cassandra capacity info');
+      }
+
+      const maxItems = CACHE.MAX_FILES;
+      const maxBytes = maxItems * 10 * 1024 * 1024; // Estimate 10MB average per file
+      const usedPercentage = maxItems > 0 ? (itemCount / maxItems) * 100 : 0;
+
+      return {
+        usedBytes,
+        maxBytes,
+        usedPercentage,
+        itemCount,
+        maxItems,
+      };
+    } catch (error) {
+      this.errors++;
+      logger.error({
+        type: 'cassandra-cache',
+        error: error instanceof Error ? error.message : String(error),
+      }, 'Cassandra cache capacity info error');
+      
+      return {
+        usedBytes: 0,
+        maxBytes: 0,
+        usedPercentage: 0,
+        itemCount: 0,
+        maxItems: 0,
+      };
+    }
+  }
+
+  async getItemsByHitCount(limit: number = 100): Promise<Array<{
+    key: string;
+    hitCount: number;
+    size: number;
+    createdAt: Date;
+  }>> {
+    try {
+      if (!this.connected) {
+        return [];
+      }
+
+      const query = `
+        SELECT cache_key, hit_count, size, created_at
+        FROM ${this.keyspace}.${this.tableName}
+        WHERE expires_at > ?
+        LIMIT ${limit}
+        ALLOW FILTERING
+      `;
+
+      const result = await this.client.execute(query, [new Date()], {
+        consistency: types.consistencies.localOne,
+      });
+
+      const items = result.rows.map(row => ({
+        key: row.cache_key,
+        hitCount: row.hit_count ? Number(row.hit_count) : 0,
+        size: row.size ? Number(row.size) : 0,
+        createdAt: row.created_at || new Date(),
+      }));
+
+      // Sort by hit count (ascending - lowest first)
+      return items.sort((a, b) => a.hitCount - b.hitCount);
+    } catch (error) {
+      this.errors++;
+      logger.error({
+        type: 'cassandra-cache',
+        error: error instanceof Error ? error.message : String(error),
+      }, 'Cassandra cache getItemsByHitCount error');
+      return [];
+    }
+  }
+
+  async incrementHitCount(key: string): Promise<boolean> {
+    try {
+      if (!this.connected) {
+        return false;
+      }
+
+      const query = `
+        UPDATE ${this.keyspace}.${this.tableName}
+        SET hit_count = hit_count + 1
+        WHERE cache_key = ?
+      `;
+
+      await this.client.execute(query, [key], {
+        consistency: types.consistencies.localQuorum,
+      });
+
+      return true;
+    } catch (error) {
+      this.errors++;
+      logger.error({
+        type: 'cassandra-cache',
+        error: error instanceof Error ? error.message : String(error),
+        key: key.substring(0, 50),
+      }, 'Cassandra cache incrementHitCount error');
       return false;
     }
   }
