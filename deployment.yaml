@@ -1,0 +1,130 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vod-cache-config
+  namespace: edge-cdn
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  REDIS_URL: "redis://redis-cluster-service.redis-cluster:6379"
+  MINIO_ENDPOINT: "minio.minio-system"
+  MINIO_PORT: "9000"
+  MINIO_USE_SSL: "false"
+  MINIO_ACCESS_KEY: "AjXTh3UEiKTr6o7MTnnD"
+  MINIO_SECRET_KEY: "HKfMzkj4oXHqgpdFlQqsBraBYjGE5eGXBZQjqsBu"
+  MINIO_BUCKET_NAME: "test"
+  VALIDATION_CRON: "0 * * * *"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: vod-cache-cdn
+  name: vod-cache-cdn
+  namespace: edge-cdn
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vod-cache-cdn
+  template:
+    metadata:
+      labels:
+        app: vod-cache-cdn
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - vod-cache-cdn
+                topologyKey: kubernetes.io/hostname
+              weight: 100
+      imagePullSecrets:
+      - name: dockerhub-secret
+      containers:
+        - name: edge-vod-cache
+          image: namipsg/manabakh:fcdn-r8
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          envFrom:
+          - configMapRef:
+              name: vod-cache-config
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+            requests:
+              cpu: 200m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vod-cache-service
+  namespace: edge-cdn
+  labels:
+    app: vod-cache-cdn
+spec:
+  selector:
+    app: vod-cache-cdn
+  ports:
+  - name: http
+    port: 80
+    targetPort: 3000
+    protocol: TCP
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: edge-image-ingress
+  namespace: edge-cdn
+  labels:
+    app: edge-cdn
+    tier: cdn
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization,X-Cache-Layer"
+
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - fcdn.manabakh.ir
+    secretName: ssl-secret-fcdn
+  rules:
+  - host: fcdn.manabakh.ir
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: vod-cache-service
+            port:
+              number: 80

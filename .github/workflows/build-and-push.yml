@@ -1,15 +1,15 @@
-name: Build and Push VoD Edge cdn
+name: Build and Push FCDN
 
 on:
   push:
     paths:
-      - '*'
+      - '*/**'
     branches:
       - main
       - develop
   pull_request:
     paths:
-      - '*'
+      - '*/**'
     branches:
       - main
       - develop
