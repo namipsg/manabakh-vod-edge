@@ -1,15 +1,11 @@
-name: Build and Push FCDN
+name: Build and Push MCDN
 
 on:
   push:
-    paths:
-      - '*/**'
     branches:
       - main
       - develop
   pull_request:
-    paths:
-      - '*/**'
     branches:
       - main
       - develop

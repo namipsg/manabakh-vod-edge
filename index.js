@@ -3,7 +3,8 @@ const express = require('express');
 const redis = require('redis');
 const { Client } = require('minio');
 const { EventEmitter } = require('events');
-
+const { Readable } = require('stream');
+const mime = require('mime-types');
 const app = express();
 const port = process.env.PORT || 3000;
 const minioBucket = process.env.MINIO_BUCKET_NAME || 'test'
@@ -34,7 +35,7 @@ async function initializeRedis() {
 }
 
 async function incrementHitCount(filename) {
-  await redisClient.hIncrBy('hit_counts', filename, 1);
+  await redisClient.hIncrBy('vod_hit_counts', filename, 1);
 }
 
 async function cacheFileFromMinio(filename) {
@@ -47,7 +48,7 @@ async function cacheFileFromMinio(filename) {
     }
 
     const buffer = Buffer.concat(chunks);
-    await redisClient.setEx(`vod_file:${filename}`, 3600, buffer);
+    await redisClient.setEx(`vod_file:${filename}`, 3600, buffer.toString('base64'));
     console.log(`Cached ${filename} to Redis`);
   } catch (error) {
     console.error(`Failed to cache ${filename}:`, error.message);
@@ -66,17 +67,19 @@ app.get('/nami/*', async (req, res) => {
 
     if (cachedFile) {
       console.log(`Cache hit for ${filename}`);
-      res.set('Content-Type', 'image/*');
+      res.set('Content-Type', mime.lookup(filename) || 'application/octet-stream');
       res.set('Cache-Control', 'public, max-age=3600');
       res.set('X-Cache-Layer', 'L0-Redis');
-      return res.send(Buffer.from(cachedFile, 'binary'));
+      const buffer = Buffer.from(cachedFile, 'base64');
+      const stream = Readable.from(buffer);
+      return stream.pipe(res);
     }
 
     console.log(`Cache miss for ${filename}, fetching from Minio`);
 
     const stream = await minioClient.getObject(minioBucket, filename);
 
-    res.set('Content-Type', 'image/*');
+    res.set('Content-Type', mime.lookup(filename) || 'application/octet-stream');
     res.set('Cache-Control', 'public, max-age=3600');
     res.set('X-Cache-Layer', 'L1-Minio');
 
@@ -109,17 +112,19 @@ app.get('/vod/*', async (req, res) => {
 
     if (cachedFile) {
       console.log(`Cache hit for ${filename}`);
-      res.set('Content-Type', 'image/*');
+      res.set('Content-Type', mime.lookup(filename) || 'application/octet-stream');
       res.set('Cache-Control', 'public, max-age=3600');
       res.set('X-Cache-Layer', 'L0-Redis');
-      return res.send(Buffer.from(cachedFile, 'binary'));
+      const buffer = Buffer.from(cachedFile, 'base64');
+      const stream = Readable.from(buffer);
+      return stream.pipe(res);
     }
 
     console.log(`Cache miss for ${filename}, fetching from Minio`);
 
     const stream = await minioClient.getObject(minioBucket, filename);
 
-    res.set('Content-Type', 'image/*');
+    res.set('Content-Type', mime.lookup(filename) || 'application/octet-stream');
     res.set('Cache-Control', 'public, max-age=3600');
     res.set('X-Cache-Layer', 'L1-Minio');
 
@@ -144,7 +149,7 @@ app.get('/vod/*', async (req, res) => {
 
 app.get('/stats', async (req, res) => {
   try {
-    const redisHitCounts = await redisClient.hGetAll('hit_counts');
+    const redisHitCounts = await redisClient.hGetAll('vod_hit_counts');
     res.json({ hitCounts: redisHitCounts });
   } catch (error) {
     res.status(500).json({ error: 'Failed to retrieve stats' });
