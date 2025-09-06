@@ -48,7 +48,7 @@ async function cacheFileFromMinio(filename) {
     }
 
     const buffer = Buffer.concat(chunks);
-    await redisClient.setEx(`vod_file:${filename}`, 3600, buffer.toString('base64'));
+    await redisClient.set(`vod_file:${filename}`, buffer.toString('base64'));
     console.log(`Cached ${filename} to Redis`);
   } catch (error) {
     console.error(`Failed to cache ${filename}:`, error.message);
