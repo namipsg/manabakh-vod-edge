@@ -5,14 +5,17 @@ const { Client } = require('minio');
 const { EventEmitter } = require('events');
 const { Readable } = require('stream');
 const path = require('path');
+const { gzip, gunzip } = require('zlib');
+const { promisify } = require('util');
 const mime = require('mime-types');
-const sharp = require('sharp');
 const app = express();
 const port = process.env.PORT || 3000;
-const minioBucket = process.env.MINIO_BUCKET_NAME || 'test'
+const minioBucket = process.env.MINIO_BUCKET_NAME || 'test';
 const cacheTtlSeconds = parseInt(process.env.CACHE_TTL_SECONDS, 10) || 3600;
 const ttlExtensions = new Set(['.json', '.vtt', '.png']);
 const compressibleImageExtensions = new Set(['.png', '.jpg', '.jpeg']);
+const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
 
 const redisClient = redis.createClient({
   socket: {
@@ -65,22 +68,31 @@ async function streamToBuffer(stream) {
   return Buffer.concat(chunks);
 }
 
-async function compressImageForCache(filename, buffer) {
-  const extension = getFileExtension(filename);
-
-  if (extension === '.png') {
-    return sharp(buffer)
-      .png({ compressionLevel: 9, adaptiveFiltering: true })
-      .toBuffer();
+async function encodeCacheValue(filename, buffer) {
+  if (!shouldCompressImage(filename)) {
+    return buffer.toString('base64');
   }
 
-  if (extension === '.jpg' || extension === '.jpeg') {
-    return sharp(buffer)
-      .jpeg({ quality: 80, mozjpeg: true })
-      .toBuffer();
+  const compressedBuffer = await gzipAsync(buffer);
+
+  return JSON.stringify({
+    encoding: 'gzip',
+    data: compressedBuffer.toString('base64')
+  });
+}
+
+async function decodeCacheValue(cachedFile) {
+  try {
+    const parsedCacheValue = JSON.parse(cachedFile);
+
+    if (parsedCacheValue.encoding === 'gzip' && parsedCacheValue.data) {
+      return gunzipAsync(Buffer.from(parsedCacheValue.data, 'base64'));
+    }
+  } catch (error) {
+    return Buffer.from(cachedFile, 'base64');
   }
 
-  return buffer;
+  return Buffer.from(cachedFile, 'base64');
 }
 
 async function getCachedFile(filename) {
@@ -101,18 +113,15 @@ async function getCachedFile(filename) {
     }
   }
 
-  return cachedFile;
+  return decodeCacheValue(cachedFile);
 }
 
 async function cacheFileFromMinio(filename) {
   try {
     const stream = await minioClient.getObject(minioBucket, filename);
     const buffer = await streamToBuffer(stream);
-    const cacheBuffer = shouldCompressImage(filename)
-      ? await compressImageForCache(filename, buffer)
-      : buffer;
     const cacheKey = `vod_file:${filename}`;
-    const cacheValue = cacheBuffer.toString('base64');
+    const cacheValue = await encodeCacheValue(filename, buffer);
 
     if (shouldUseTtl(filename)) {
       await redisClient.set(cacheKey, cacheValue, { EX: cacheTtlSeconds });
@@ -141,8 +150,7 @@ app.get('/nami/*', async (req, res) => {
       res.set('Content-Type', mime.lookup(filename) || 'application/octet-stream');
       res.set('Cache-Control', 'public, max-age=3600');
       res.set('X-Cache-Layer', 'L0-Redis');
-      const buffer = Buffer.from(cachedFile, 'base64');
-      const stream = Readable.from(buffer);
+      const stream = Readable.from(cachedFile);
       return stream.pipe(res);
     }
 
@@ -186,8 +194,7 @@ app.get('/vod/*', async (req, res) => {
       res.set('Content-Type', mime.lookup(filename) || 'application/octet-stream');
       res.set('Cache-Control', 'public, max-age=3600');
       res.set('X-Cache-Layer', 'L0-Redis');
-      const buffer = Buffer.from(cachedFile, 'base64');
-      const stream = Readable.from(buffer);
+      const stream = Readable.from(cachedFile);
       return stream.pipe(res);
     }
 
