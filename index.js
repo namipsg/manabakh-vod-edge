@@ -4,10 +4,15 @@ const redis = require('redis');
 const { Client } = require('minio');
 const { EventEmitter } = require('events');
 const { Readable } = require('stream');
+const path = require('path');
 const mime = require('mime-types');
+const sharp = require('sharp');
 const app = express();
 const port = process.env.PORT || 3000;
 const minioBucket = process.env.MINIO_BUCKET_NAME || 'test'
+const cacheTtlSeconds = parseInt(process.env.CACHE_TTL_SECONDS, 10) || 3600;
+const ttlExtensions = new Set(['.json', '.vtt', '.png']);
+const compressibleImageExtensions = new Set(['.png', '.jpg', '.jpeg']);
 
 const redisClient = redis.createClient({
   socket: {
@@ -38,17 +43,83 @@ async function incrementHitCount(filename) {
   await redisClient.hIncrBy('vod_hit_counts', filename, 1);
 }
 
+function getFileExtension(filename) {
+  return path.extname(filename).toLowerCase();
+}
+
+function shouldUseTtl(filename) {
+  return ttlExtensions.has(getFileExtension(filename));
+}
+
+function shouldCompressImage(filename) {
+  return compressibleImageExtensions.has(getFileExtension(filename));
+}
+
+async function streamToBuffer(stream) {
+  const chunks = [];
+
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+
+  return Buffer.concat(chunks);
+}
+
+async function compressImageForCache(filename, buffer) {
+  const extension = getFileExtension(filename);
+
+  if (extension === '.png') {
+    return sharp(buffer)
+      .png({ compressionLevel: 9, adaptiveFiltering: true })
+      .toBuffer();
+  }
+
+  if (extension === '.jpg' || extension === '.jpeg') {
+    return sharp(buffer)
+      .jpeg({ quality: 80, mozjpeg: true })
+      .toBuffer();
+  }
+
+  return buffer;
+}
+
+async function getCachedFile(filename) {
+  const cacheKey = `vod_file:${filename}`;
+  const cachedFile = await redisClient.get(cacheKey);
+
+  if (!cachedFile) {
+    return null;
+  }
+
+  if (shouldUseTtl(filename)) {
+    const ttl = await redisClient.ttl(cacheKey);
+
+    if (ttl === -1) {
+      console.log(`Cache entry for ${filename} has no TTL, re-caching from Minio`);
+      await redisClient.del(cacheKey);
+      return null;
+    }
+  }
+
+  return cachedFile;
+}
+
 async function cacheFileFromMinio(filename) {
   try {
     const stream = await minioClient.getObject(minioBucket, filename);
-    const chunks = [];
+    const buffer = await streamToBuffer(stream);
+    const cacheBuffer = shouldCompressImage(filename)
+      ? await compressImageForCache(filename, buffer)
+      : buffer;
+    const cacheKey = `vod_file:${filename}`;
+    const cacheValue = cacheBuffer.toString('base64');
 
-    for await (const chunk of stream) {
-      chunks.push(chunk);
+    if (shouldUseTtl(filename)) {
+      await redisClient.set(cacheKey, cacheValue, { EX: cacheTtlSeconds });
+    } else {
+      await redisClient.set(cacheKey, cacheValue);
     }
 
-    const buffer = Buffer.concat(chunks);
-    await redisClient.set(`vod_file:${filename}`, buffer.toString('base64'));
     console.log(`Cached ${filename} to Redis`);
   } catch (error) {
     console.error(`Failed to cache ${filename}:`, error.message);
@@ -63,7 +134,7 @@ app.get('/nami/*', async (req, res) => {
   try {
     await incrementHitCount(filename);
 
-    const cachedFile = await redisClient.get(`vod_file:${filename}`);
+    const cachedFile = await getCachedFile(filename);
 
     if (cachedFile) {
       console.log(`Cache hit for ${filename}`);
@@ -108,7 +179,7 @@ app.get('/vod/*', async (req, res) => {
   try {
     await incrementHitCount(filename);
 
-    const cachedFile = await redisClient.get(`vod_file:${filename}`);
+    const cachedFile = await getCachedFile(filename);
 
     if (cachedFile) {
       console.log(`Cache hit for ${filename}`);
