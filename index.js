@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('./instrument');
 const express = require('express');
 const redis = require('redis');
 const { Client } = require('minio');
@@ -8,6 +8,7 @@ const path = require('path');
 const { gzip, gunzip } = require('zlib');
 const { promisify } = require('util');
 const mime = require('mime-types');
+const Sentry = require("@sentry/node");
 const app = express();
 const port = process.env.PORT || 3000;
 const minioBucket = process.env.MINIO_BUCKET_NAME || 'test';
@@ -246,6 +247,9 @@ app.get('/ready', async (req, res) => {
     res.status(503).json({ status: 'not ready', error: error.message });
   }
 });
+
+// Sentry error handler setup
+Sentry.setupExpressErrorHandler(app);
 
 const server = app.listen(port, async () => {
   try {
