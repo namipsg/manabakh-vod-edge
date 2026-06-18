@@ -5,7 +5,7 @@ function createFakeRedis() {
   const hashes = new Map();
   const expiring = new Set();
 
-  return {
+  const redisClient = {
     values,
     connect: jest.fn().mockResolvedValue(undefined),
     quit: jest.fn().mockResolvedValue(undefined),
@@ -20,6 +20,14 @@ function createFakeRedis() {
       values.delete(key);
       expiring.delete(key);
     }),
+    scan: jest.fn(async (cursor, options = {}) => {
+      const pattern = options.MATCH || '*';
+      const regex = new RegExp(`^${pattern.replace(/\*/g, '.*')}$`);
+      return {
+        cursor: '0',
+        keys: Array.from(values.keys()).filter((key) => regex.test(key)),
+      };
+    }),
     hIncrBy: jest.fn(async (key, field, amount) => {
       const hash = hashes.get(key) || {};
       hash[field] = String(Number(hash[field] || 0) + amount);
@@ -27,6 +35,20 @@ function createFakeRedis() {
     }),
     hGetAll: jest.fn(async (key) => ({ ...(hashes.get(key) || {}) })),
   };
+
+  redisClient.multi = jest.fn(() => {
+    const commands = [];
+    const batch = {
+      hIncrBy: (key, field, amount) => {
+        commands.push(() => redisClient.hIncrBy(key, field, amount));
+        return batch;
+      },
+      exec: async () => Promise.all(commands.map((command) => command())),
+    };
+    return batch;
+  });
+
+  return redisClient;
 }
 
 function createFakeMinio(objects = {}) {

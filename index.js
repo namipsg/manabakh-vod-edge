@@ -13,6 +13,12 @@ const app = express();
 const port = process.env.PORT || 3000;
 const minioBucket = process.env.MINIO_BUCKET_NAME || 'test';
 const cacheTtlSeconds = parseInt(process.env.CACHE_TTL_SECONDS, 10) || 3600;
+const cacheKeyPrefix = process.env.VOD_CACHE_REDIS_PREFIX || 'vod_file:';
+const metricsKey = process.env.VOD_CDN_METRICS_KEY || 'vod_metrics';
+const hitCountsKey = process.env.VOD_CDN_HIT_COUNTS_KEY || 'vod_hit_counts';
+const requestLogEnabled = process.env.VOD_CDN_REQUEST_LOGS === undefined
+  ? process.env.NODE_ENV !== 'production'
+  : process.env.VOD_CDN_REQUEST_LOGS === 'true';
 const ttlExtensions = new Set(['.json', '.vtt', '.png']);
 const cacheExcludedExtensions = new Set(['.mp4']);
 const rangeEnabledExtensions = new Set(['.mp4']);
@@ -45,8 +51,44 @@ async function initializeRedis() {
   console.log('Connected to Redis');
 }
 
+function logRequestDetail(message) {
+  if (requestLogEnabled) {
+    console.log(message);
+  }
+}
+
 async function incrementHitCount(filename) {
-  await redisClient.hIncrBy('vod_hit_counts', filename, 1);
+  await redisClient.hIncrBy(hitCountsKey, filename, 1);
+}
+
+async function incrementMetrics(updates) {
+  if (!updates.length) {
+    return;
+  }
+
+  try {
+    const batch = redisClient.multi();
+    for (const [field, amount] of updates) {
+      batch.hIncrBy(metricsKey, field, amount);
+    }
+    await batch.exec();
+  } catch (error) {
+    console.error('Failed to increment VOD CDN metrics:', error.message);
+  }
+}
+
+async function incrementMetric(field, amount = 1) {
+  await incrementMetrics([[field, amount]]);
+}
+
+async function incrementRequestMetrics(filename) {
+  await Promise.all([
+    incrementHitCount(filename),
+    incrementMetrics([
+      ['totalServedRequests', 1],
+      [`extension:${getFileExtension(filename) || 'none'}:requests`, 1],
+    ]),
+  ]);
 }
 
 function getFileExtension(filename) {
@@ -119,7 +161,7 @@ async function getCachedFile(filename) {
     return null;
   }
 
-  const cacheKey = `vod_file:${filename}`;
+  const cacheKey = `${cacheKeyPrefix}${filename}`;
   const cachedFile = await redisClient.get(cacheKey);
 
   if (!cachedFile) {
@@ -132,6 +174,10 @@ async function getCachedFile(filename) {
     if (ttl === -1) {
       console.log(`Cache entry for ${filename} has no TTL, re-caching from Minio`);
       await redisClient.del(cacheKey);
+      await incrementMetrics([
+        ['evictedFiles', 1],
+        ['evictedNoTtlFiles', 1],
+      ]);
       return null;
     }
   }
@@ -147,7 +193,7 @@ async function cacheFileFromMinio(filename) {
   try {
     const stream = await minioClient.getObject(minioBucket, filename);
     const buffer = await streamToBuffer(stream);
-    const cacheKey = `vod_file:${filename}`;
+    const cacheKey = `${cacheKeyPrefix}${filename}`;
     const cacheValue = await encodeCacheValue(filename, buffer);
 
     if (shouldUseTtl(filename)) {
@@ -157,8 +203,14 @@ async function cacheFileFromMinio(filename) {
     }
 
     console.log(`Cached ${filename} to Redis`);
+    await incrementMetrics([
+      ['cachedFiles', 1],
+      ['cachedBytes', buffer.length],
+      ['cachedByFallbackFiles', 1],
+    ]);
   } catch (error) {
     console.error(`Failed to cache ${filename}:`, error.message);
+    await incrementMetric('cacheWriteFailures');
   }
 }
 
@@ -224,6 +276,7 @@ async function serveRangeEnabledFile(req, res, filename) {
 
   if (range?.invalid) {
     res.set('Content-Range', `bytes */${fileSize}`);
+    await incrementMetric('rangeInvalidRequests');
     return res.status(416).end();
   }
 
@@ -231,6 +284,11 @@ async function serveRangeEnabledFile(req, res, filename) {
     const chunkSize = range.end - range.start + 1;
     const stream = await getPartialObjectStream(filename, range.start, chunkSize);
 
+    await incrementMetrics([
+      ['rangeRequests', 1],
+      ['rangeServedBytes', chunkSize],
+      ['cacheBypassRequests', 1],
+    ]);
     res.status(206);
     res.set('Content-Range', `bytes ${range.start}-${range.end}/${fileSize}`);
     res.set('Content-Length', String(chunkSize));
@@ -240,6 +298,11 @@ async function serveRangeEnabledFile(req, res, filename) {
 
   const stream = await minioClient.getObject(minioBucket, filename);
 
+  await incrementMetrics([
+    ['minioStreamRequests', 1],
+    ['cacheBypassRequests', 1],
+    ['minioStreamBytes', fileSize],
+  ]);
   res.set('Content-Length', String(fileSize));
   res.set('X-Cache-Layer', 'L1-Minio-Stream');
   return stream.pipe(res);
@@ -249,7 +312,7 @@ async function serveFile(req, res) {
   const filename = req.params[0];
 
   try {
-    await incrementHitCount(filename);
+    await incrementRequestMetrics(filename);
 
     if (supportsRangeRequests(filename)) {
       return serveRangeEnabledFile(req, res, filename);
@@ -258,7 +321,12 @@ async function serveFile(req, res) {
     const cachedFile = await getCachedFile(filename);
 
     if (cachedFile) {
-      console.log(`Cache hit for ${filename}`);
+      logRequestDetail(`Cache hit for ${filename}`);
+      await incrementMetrics([
+        ['cacheHits', 1],
+        ['redisServedRequests', 1],
+        ['redisServedBytes', cachedFile.length],
+      ]);
       res.set('Content-Type', getContentType(filename));
       res.set('Cache-Control', 'public, max-age=3600');
       res.set('X-Cache-Layer', 'L0-Redis');
@@ -266,7 +334,8 @@ async function serveFile(req, res) {
       return stream.pipe(res);
     }
 
-    console.log(`Cache miss for ${filename}, fetching from Minio`);
+    logRequestDetail(`Cache miss for ${filename}, fetching from Minio`);
+    await incrementMetric('cacheMisses');
 
     const stream = await minioClient.getObject(minioBucket, filename);
 
@@ -274,6 +343,7 @@ async function serveFile(req, res) {
     res.set('Cache-Control', 'public, max-age=3600');
     res.set('X-Cache-Layer', 'L1-Minio');
 
+    await incrementMetric('minioFallbackRequests');
     stream.pipe(res);
 
     if (!isCacheExcluded(filename)) {
@@ -284,13 +354,16 @@ async function serveFile(req, res) {
     console.error(`Error serving ${filename}:`, error.message);
 
     if (error.code === 'NoSuchKey') {
+      await incrementMetric('notFoundResponses');
       return res.status(404).json({ error: 'File not found' });
     }
 
     if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+      await incrementMetric('backendUnavailableResponses');
       return res.status(502).json({ error: 'Backend service unavailable' });
     }
 
+    await incrementMetric('internalErrorResponses');
     res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -298,14 +371,157 @@ async function serveFile(req, res) {
 app.get('/nami/*', serveFile);
 app.get('/vod/*', serveFile);
 
-app.get('/stats', async (req, res) => {
+async function countCachedFiles() {
+  let cursor = '0';
+  let count = 0;
+
+  do {
+    const scanResult = await redisClient.scan(cursor, {
+      MATCH: `${cacheKeyPrefix}*`,
+      COUNT: 100,
+    });
+
+    cursor = String(scanResult.cursor);
+    count += scanResult.keys.length;
+  } while (cursor !== '0');
+
+  return count;
+}
+
+function parseMetricValue(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : value;
+}
+
+function normalizeMetrics(metrics) {
+  return Object.entries(metrics).reduce((acc, [key, value]) => {
+    acc[key] = parseMetricValue(value);
+    return acc;
+  }, {});
+}
+
+async function buildMetricsSnapshot() {
+  const [metrics, hitCounts, currentCachedFiles] = await Promise.all([
+    redisClient.hGetAll(metricsKey),
+    redisClient.hGetAll(hitCountsKey),
+    countCachedFiles(),
+  ]);
+
+  return {
+    service: 'vod-cdn',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    redis: {
+      cacheKeyPrefix,
+      metricsKey,
+      hitCountsKey,
+      currentCachedFiles,
+    },
+    config: {
+      cacheTtlSeconds,
+      requestLogEnabled,
+      ttlExtensions: Array.from(ttlExtensions),
+      cacheExcludedExtensions: Array.from(cacheExcludedExtensions),
+      rangeEnabledExtensions: Array.from(rangeEnabledExtensions),
+    },
+    totals: normalizeMetrics(metrics),
+    hitCounts,
+  };
+}
+
+async function sendMetrics(req, res) {
   try {
-    const redisHitCounts = await redisClient.hGetAll('vod_hit_counts');
-    res.json({ hitCounts: redisHitCounts });
+    res.json(await buildMetricsSnapshot());
   } catch (error) {
     res.status(500).json({ error: 'Failed to retrieve stats' });
   }
-});
+}
+
+function prometheusMetricName(field) {
+  const names = {
+    backendUnavailableResponses: 'vod_cdn_backend_unavailable_responses_total',
+    cacheBypassRequests: 'vod_cdn_cache_bypass_requests_total',
+    cachedByFallbackFiles: 'vod_cdn_cached_by_fallback_files_total',
+    cachedBytes: 'vod_cdn_cached_bytes_total',
+    cachedFiles: 'vod_cdn_cached_files_total',
+    cacheHits: 'vod_cdn_cache_hits_total',
+    cacheMisses: 'vod_cdn_cache_misses_total',
+    cacheWriteFailures: 'vod_cdn_cache_write_failures_total',
+    evictedFiles: 'vod_cdn_evicted_files_total',
+    evictedNoTtlFiles: 'vod_cdn_evicted_no_ttl_files_total',
+    internalErrorResponses: 'vod_cdn_internal_error_responses_total',
+    minioFallbackRequests: 'vod_cdn_minio_fallback_requests_total',
+    minioStreamBytes: 'vod_cdn_minio_stream_bytes_total',
+    minioStreamRequests: 'vod_cdn_minio_stream_requests_total',
+    notFoundResponses: 'vod_cdn_not_found_responses_total',
+    rangeInvalidRequests: 'vod_cdn_range_invalid_requests_total',
+    rangeRequests: 'vod_cdn_range_requests_total',
+    rangeServedBytes: 'vod_cdn_range_served_bytes_total',
+    redisServedBytes: 'vod_cdn_redis_served_bytes_total',
+    redisServedRequests: 'vod_cdn_redis_served_requests_total',
+    totalServedRequests: 'vod_cdn_requests_total',
+  };
+
+  return names[field];
+}
+
+function escapePrometheusLabelValue(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/"/g, '\\"');
+}
+
+function formatPrometheusSample(name, value, labels = {}) {
+  const labelEntries = Object.entries(labels);
+  const labelText = labelEntries.length
+    ? `{${labelEntries.map(([key, labelValue]) => `${key}="${escapePrometheusLabelValue(labelValue)}"`).join(',')}}`
+    : '';
+
+  return `${name}${labelText} ${Number(value) || 0}`;
+}
+
+function buildPrometheusMetrics(snapshot) {
+  const lines = [
+    '# HELP vod_cdn_info Static service identity.',
+    '# TYPE vod_cdn_info gauge',
+    formatPrometheusSample('vod_cdn_info', 1, { service: snapshot.service }),
+    '# HELP vod_cdn_uptime_seconds Process uptime in seconds.',
+    '# TYPE vod_cdn_uptime_seconds gauge',
+    formatPrometheusSample('vod_cdn_uptime_seconds', snapshot.uptime),
+    '# HELP vod_cdn_current_cached_files Current number of VOD CDN files in Redis.',
+    '# TYPE vod_cdn_current_cached_files gauge',
+    formatPrometheusSample('vod_cdn_current_cached_files', snapshot.redis.currentCachedFiles),
+  ];
+
+  for (const [field, value] of Object.entries(snapshot.totals)) {
+    const extensionMatch = field.match(/^extension:(.*):requests$/);
+
+    if (extensionMatch) {
+      lines.push(formatPrometheusSample('vod_cdn_extension_requests_total', value, {
+        extension: extensionMatch[1],
+      }));
+      continue;
+    }
+
+    const metricName = prometheusMetricName(field);
+    if (metricName) {
+      lines.push(formatPrometheusSample(metricName, value));
+    }
+  }
+
+  return `${lines.join('\n')}\n`;
+}
+
+async function sendPrometheusMetrics(req, res) {
+  try {
+    res.type('text/plain; version=0.0.4; charset=utf-8');
+    res.send(buildPrometheusMetrics(await buildMetricsSnapshot()));
+  } catch (error) {
+    res.status(500).type('text/plain').send('Failed to retrieve VOD CDN metrics\n');
+  }
+}
+
+app.get('/stats', sendMetrics);
+app.get('/metrics', sendMetrics);
+app.get('/metrics/prometheus', sendPrometheusMetrics);
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
@@ -370,6 +586,8 @@ module.exports = {
   getCachedFile,
   gracefulShutdown,
   isCacheExcluded,
+  buildMetricsSnapshot,
+  buildPrometheusMetrics,
   parseRangeHeader,
   serveRangeEnabledFile,
   startServer,

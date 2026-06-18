@@ -4,6 +4,7 @@ metadata:
   name: vod-cache-config
   namespace: edge-cdn
 data:
+  NODE_ENV: production
   MINIO_ACCESS_KEY: rfdJLfDAM3ROyNrBFmsL
   MINIO_BUCKET_NAME: nami
   MINIO_ENDPOINT: minio.minio-system
@@ -13,6 +14,10 @@ data:
   PORT: '3000'
   REDIS_HOST: redis-cluster-service.redis-cluster
   REDIS_PORT: '6379'
+  VOD_CACHE_REDIS_PREFIX: 'vod_file:'
+  VOD_CDN_METRICS_KEY: vod_metrics
+  VOD_CDN_HIT_COUNTS_KEY: vod_hit_counts
+  VOD_CDN_REQUEST_LOGS: 'false'
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -93,6 +98,10 @@ metadata:
   namespace: edge-cdn
   labels:
     app: vod-cache-cdn
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: /metrics/prometheus
+    prometheus.io/port: "80"
 spec:
   selector:
     app: vod-cache-cdn
@@ -140,3 +149,22 @@ spec:
             name: vod-cache-service
             port:
               number: 80
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vod-cdn
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  namespaceSelector:
+    matchNames:
+    - edge-cdn
+  selector:
+    matchLabels:
+      app: vod-cache-cdn
+  endpoints:
+  - port: http
+    path: /metrics/prometheus
+    interval: 30s
