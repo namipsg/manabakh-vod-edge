@@ -19,7 +19,7 @@ const hitCountsKey = process.env.VOD_CDN_HIT_COUNTS_KEY || 'vod_hit_counts';
 const requestLogEnabled = process.env.VOD_CDN_REQUEST_LOGS === undefined
   ? process.env.NODE_ENV !== 'production'
   : process.env.VOD_CDN_REQUEST_LOGS === 'true';
-const ttlExtensions = new Set(['.json', '.vtt', '.png']);
+const ttlExtensions = new Set(['.json', '.vtt', '.png', '.ts']);
 const cacheExcludedExtensions = new Set(['.mp4']);
 const rangeEnabledExtensions = new Set(['.mp4']);
 const compressibleImageExtensions = new Set(['.png', '.jpg', '.jpeg']);

@@ -12,8 +12,9 @@ data:
   MINIO_SECRET_KEY: 0EE1FqCiWj5EeVGepSCGcHgqKNbDOPI55Qh2r8yj
   MINIO_USE_SSL: 'false'
   PORT: '3000'
-  REDIS_HOST: redis-cluster-service.redis-cluster
+  REDIS_HOST: redis-vod-main.redis-cluster
   REDIS_PORT: '6379'
+  CACHE_TTL_SECONDS: '3600'
   VOD_CACHE_REDIS_PREFIX: 'vod_file:'
   VOD_CDN_METRICS_KEY: vod_metrics
   VOD_CDN_HIT_COUNTS_KEY: vod_hit_counts
