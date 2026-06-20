@@ -2,7 +2,6 @@ require('./instrument');
 const express = require('express');
 const redis = require('redis');
 const { Client } = require('minio');
-const { EventEmitter } = require('events');
 const { Readable } = require('stream');
 const path = require('path');
 const { gzip, gunzip } = require('zlib');
@@ -44,7 +43,7 @@ const minioClient = new Client({
   secretKey: process.env.MINIO_SECRET_KEY || 'minioadmin'
 });
 
-const cacheEvents = new EventEmitter();
+const inFlightCacheFills = new Map();
 
 async function initializeRedis() {
   await redisClient.connect();
@@ -185,14 +184,8 @@ async function getCachedFile(filename) {
   return decodeCacheValue(cachedFile);
 }
 
-async function cacheFileFromMinio(filename) {
-  if (isCacheExcluded(filename)) {
-    return;
-  }
-
+async function writeBufferToRedis(filename, buffer) {
   try {
-    const stream = await minioClient.getObject(minioBucket, filename);
-    const buffer = await streamToBuffer(stream);
     const cacheKey = `${cacheKeyPrefix}${filename}`;
     const cacheValue = await encodeCacheValue(filename, buffer);
 
@@ -214,7 +207,65 @@ async function cacheFileFromMinio(filename) {
   }
 }
 
-cacheEvents.on('cache_file', cacheFileFromMinio);
+async function readAndCacheFileFromMinio(filename) {
+  const stream = await minioClient.getObject(minioBucket, filename);
+  const buffer = await streamToBuffer(stream);
+
+  if (!isCacheExcluded(filename)) {
+    await writeBufferToRedis(filename, buffer);
+  }
+
+  return buffer;
+}
+
+async function cacheFileFromMinio(filename) {
+  if (isCacheExcluded(filename)) {
+    return;
+  }
+
+  try {
+    await readAndCacheFileFromMinio(filename);
+  } catch (error) {
+    console.error(`Failed to cache ${filename}:`, error.message);
+    await incrementMetric('cacheWriteFailures');
+  }
+}
+
+function getOrCreateCacheFill(filename) {
+  const existing = inFlightCacheFills.get(filename);
+
+  if (existing) {
+    return {
+      coalesced: true,
+      promise: existing,
+    };
+  }
+
+  const startedAt = Date.now();
+  const promise = readAndCacheFileFromMinio(filename)
+    .then(async (buffer) => {
+      await incrementMetrics([
+        ['cacheFillRequests', 1],
+        ['cacheFillBytes', buffer.length],
+        ['cacheFillDurationMs', Date.now() - startedAt],
+      ]);
+      return buffer;
+    })
+    .catch(async (error) => {
+      await incrementMetric('cacheFillFailures');
+      throw error;
+    })
+    .finally(() => {
+      inFlightCacheFills.delete(filename);
+    });
+
+  inFlightCacheFills.set(filename, promise);
+
+  return {
+    coalesced: false,
+    promise,
+  };
+}
 
 function parseRangeHeader(rangeHeader, fileSize) {
   if (!rangeHeader) return null;
@@ -337,18 +388,19 @@ async function serveFile(req, res) {
     logRequestDetail(`Cache miss for ${filename}, fetching from Minio`);
     await incrementMetric('cacheMisses');
 
-    const stream = await minioClient.getObject(minioBucket, filename);
+    const { coalesced, promise } = getOrCreateCacheFill(filename);
+    const buffer = await promise;
 
     res.set('Content-Type', getContentType(filename));
     res.set('Cache-Control', 'public, max-age=3600');
-    res.set('X-Cache-Layer', 'L1-Minio');
+    res.set('Content-Length', String(buffer.length));
+    res.set('X-Cache-Layer', coalesced ? 'L1-Minio-Coalesced' : 'L1-Minio');
 
-    await incrementMetric('minioFallbackRequests');
-    stream.pipe(res);
-
-    if (!isCacheExcluded(filename)) {
-      cacheEvents.emit('cache_file', filename);
-    }
+    await incrementMetrics([
+      ['minioFallbackRequests', 1],
+      ...(coalesced ? [['coalescedRequests', 1]] : []),
+    ]);
+    return Readable.from(buffer).pipe(res);
 
   } catch (error) {
     console.error(`Error serving ${filename}:`, error.message);
@@ -417,6 +469,9 @@ async function buildMetricsSnapshot() {
       hitCountsKey,
       currentCachedFiles,
     },
+    cache: {
+      inFlightCacheFills: inFlightCacheFills.size,
+    },
     config: {
       cacheTtlSeconds,
       requestLogEnabled,
@@ -444,9 +499,14 @@ function prometheusMetricName(field) {
     cachedByFallbackFiles: 'vod_cdn_cached_by_fallback_files_total',
     cachedBytes: 'vod_cdn_cached_bytes_total',
     cachedFiles: 'vod_cdn_cached_files_total',
+    cacheFillBytes: 'vod_cdn_cache_fill_bytes_total',
+    cacheFillDurationMs: 'vod_cdn_cache_fill_duration_ms_total',
+    cacheFillFailures: 'vod_cdn_cache_fill_failures_total',
+    cacheFillRequests: 'vod_cdn_cache_fill_requests_total',
     cacheHits: 'vod_cdn_cache_hits_total',
     cacheMisses: 'vod_cdn_cache_misses_total',
     cacheWriteFailures: 'vod_cdn_cache_write_failures_total',
+    coalescedRequests: 'vod_cdn_coalesced_requests_total',
     evictedFiles: 'vod_cdn_evicted_files_total',
     evictedNoTtlFiles: 'vod_cdn_evicted_no_ttl_files_total',
     internalErrorResponses: 'vod_cdn_internal_error_responses_total',
@@ -489,6 +549,9 @@ function buildPrometheusMetrics(snapshot) {
     '# HELP vod_cdn_current_cached_files Current number of VOD CDN files in Redis.',
     '# TYPE vod_cdn_current_cached_files gauge',
     formatPrometheusSample('vod_cdn_current_cached_files', snapshot.redis.currentCachedFiles),
+    '# HELP vod_cdn_in_flight_cache_fills Current number of cache fills shared by concurrent requests.',
+    '# TYPE vod_cdn_in_flight_cache_fills gauge',
+    formatPrometheusSample('vod_cdn_in_flight_cache_fills', snapshot.cache.inFlightCacheFills),
   ];
 
   for (const [field, value] of Object.entries(snapshot.totals)) {
@@ -583,6 +646,7 @@ if (require.main === module) {
 module.exports = {
   app,
   cacheFileFromMinio,
+  getOrCreateCacheFill,
   getCachedFile,
   gracefulShutdown,
   isCacheExcluded,
